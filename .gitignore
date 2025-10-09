@@ -1,3 +1,7 @@
 laboratorios/laboratorio3/Laboratorio3/ProtocoloUDP/broker.exe
 laboratorios/laboratorio3/Laboratorio3/ProtocoloUDP/publisher.exe
 laboratorios/laboratorio3/Laboratorio3/ProtocoloUDP/subcriber.exe
+laboratorios/laboratorio3/Laboratorio3/ProtocoloTCP/subscriber.exe
+laboratorios/laboratorio3/Laboratorio3/ProtocoloTCP/broker.exe
+laboratorios/laboratorio3/Laboratorio3/ProtocoloTCP/publisher.exe
+laboratorios/laboratorio3/Laboratorio3/ProtocoloUDP/subscriber.exe

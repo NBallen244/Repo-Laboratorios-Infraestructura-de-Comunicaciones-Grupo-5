@@ -26,7 +26,7 @@ int main(int argc, char const* argv[]) {
     
     //Definimos la direccion del servidor (local por el momento)
     bzero(&serv_addr, sizeof(serv_addr));
-    serv_addr.sin_addr.s_addr = inet_addr("172.20.65.250");
+    serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     serv_addr.sin_port = htons(PORT);
     serv_addr.sin_family = AF_INET;
 
