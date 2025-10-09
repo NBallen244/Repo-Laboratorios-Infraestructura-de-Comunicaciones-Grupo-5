@@ -2,7 +2,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,23 +16,29 @@
 #define MAX_SUBS 5
 #define MAX_CLIENTS (MAX_PUBS + MAX_SUBS)
 
+typedef enum { ROLE_UNKNOWN=0, ROLE_PUBLISHER=1, ROLE_SUBSCRIBER=2 } client_role_t;
+
 // Estructura para manejar clientes
 typedef struct {
     int fd;
+    client_role_t role;
 } client_t;
 
 // Arrays para publishers y subscribers
-static client_t pubs[MAX_PUBS];
-static client_t subs[MAX_SUBS];
+static client_t clients[MAX_CLIENTS];
+static int pubs_count = 0;
+static int subs_count = 0;
 
 // Inicializacion de arrays
 static void init_arrays(void){
-    for(int i=0;i<MAX_PUBS;i++){ pubs[i].fd = -1;}
-    for(int i=0;i<MAX_SUBS;i++){ subs[i].fd = -1;}
+    for(int i=0;i<MAX_CLIENTS;i++){ clients[i].fd = -1; clients[i].role = ROLE_UNKNOWN;}
 }
 
 // Elimina un cliente (publisher o subscriber)
 static void remove_client(client_t *c){
+    if(c->role == ROLE_PUBLISHER) pubs_count--;
+    else if(c->role == ROLE_SUBSCRIBER) subs_count--;
+    c->role = ROLE_UNKNOWN;
     if(c->fd >= 0){
         close(c->fd);
         c->fd = -1;
@@ -42,10 +47,12 @@ static void remove_client(client_t *c){
 
 // Agrega un subscriber al array de subscribers
 static int add_sub(int fd){
-    for(int i=0;i<MAX_SUBS;i++){
-        if(subs[i].fd < 0){
-            subs[i].fd = fd;
-            printf("Cliente registrado como SUBSCRIBER numero %d\n", i+1);
+    for(int i=0;i<MAX_CLIENTS;i++){
+        if(clients[i].fd < 0 && subs_count < MAX_SUBS){
+            clients[i].fd = fd;
+            clients[i].role = ROLE_SUBSCRIBER;
+            printf("Cliente registrado como SUBSCRIBER de ID: %d\n", i+1);
+            subs_count++;
             return 0;
         }
     }
@@ -53,10 +60,12 @@ static int add_sub(int fd){
 }
 
 static int add_pub(int fd){
-    for(int i=0;i<MAX_PUBS;i++){
-        if(pubs[i].fd < 0){
-            pubs[i].fd = fd;
-            printf("Cliente registrado como PUBLISHER numero %d \n", i+1);
+    for(int i=0;i<MAX_CLIENTS;i++){
+        if(clients[i].fd < 0 && pubs_count < MAX_PUBS){
+            clients[i].fd = fd;
+            clients[i].role = ROLE_PUBLISHER;
+            printf("Cliente registrado como PUBLISHER de ID: %d \n", i+1);
+            pubs_count++;
             return 0;
         }
     }
@@ -64,13 +73,13 @@ static int add_pub(int fd){
 }
 
 static void broadcast_to_subs(const char *line, size_t len){
-    for(int i=0;i<MAX_SUBS;i++){
-        if(subs[i].fd >= 0){
-            ssize_t w = send(subs[i].fd, line, len, 0);
+    for(int i=0;i<MAX_CLIENTS;i++){
+        if(clients[i].fd >= 0 && clients[i].role == ROLE_SUBSCRIBER){
+            ssize_t w = send(clients[i].fd, line, len, 0);
             if(w < 0){
                 // Si está roto, cerrar, pues se desconecto el subscriber
                 printf("Error enviando a subscriber %d, cerrando conexion\n", i+1);
-                remove_client(&subs[i]);
+                remove_client(&clients[i]);
             }else{
                 printf("Mensaje enviado a subscriber %d\n", i+1);
             }
@@ -97,6 +106,15 @@ int main(int argc, char const* argv[]) {
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
+    int opt = 1;
+    //reusar el puerto inmediatamente despues de cerrar el programa
+    if (setsockopt(listen_fd, SOL_SOCKET,
+                   SO_REUSEADDR | SO_REUSEPORT, &opt,
+                   sizeof(opt))) {
+        perror("setsockopt");
+        exit(EXIT_FAILURE);
+    }
+
     //linqueamos port al socket
     if (bind(listen_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
@@ -118,7 +136,7 @@ int main(int argc, char const* argv[]) {
     char buffer[BUFFER_SIZE];
 
     client_t unknowns[MAX_PUBS + MAX_SUBS];
-    for (int i = 0; i < MAX_PUBS + MAX_SUBS; i++) {unknowns[i].fd = -1;}
+    for (int i = 0; i < MAX_PUBS + MAX_SUBS; i++) {unknowns[i].fd = -1;unknowns[i].role = ROLE_UNKNOWN;}
 
     while (1) {
         // Resetear sockets
@@ -126,16 +144,9 @@ int main(int argc, char const* argv[]) {
         FD_SET(listen_fd, &readfds);
         max_sd = listen_fd;
 
-        // Agregar sockets de publishers
-        for (int i = 0; i < MAX_PUBS; i++) {
-            sd = pubs[i].fd;
-            if (sd > 0) FD_SET(sd, &readfds);
-            if (sd > max_sd) max_sd = sd;
-        }
-
-        // Agregar sockets de subscribers
-        for (int i = 0; i < MAX_SUBS; i++) {
-            sd = subs[i].fd;
+        //Agregar sockets de los clientes actuales
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            sd = clients[i].fd;
             if (sd > 0) FD_SET(sd, &readfds);
             if (sd > max_sd) max_sd = sd;
         }
@@ -198,7 +209,7 @@ int main(int argc, char const* argv[]) {
                             remove_client(&unknowns[i]);
                         }else{
                             // Enviar confirmación de registro
-                            sprintf(msg, "SUBSCRIBE_LOGIN_OK\n");
+                            sprintf(msg, "SUBSCRIBER_LOGIN_OK\n");
                             send(sd, msg, strlen(msg), 0);
                         }
                     } else {
@@ -211,63 +222,66 @@ int main(int argc, char const* argv[]) {
                 }
             }
         }
-
-        // Manejar actividad de publishers
-        for (int i = 0; i < MAX_PUBS; i++) {
-            sd = pubs[i].fd;
+        
+        //Manejar actividad de clientes registrados
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            sd = clients[i].fd;
             if (sd < 0) continue;
-
-            if (FD_ISSET(sd, &readfds)) {
-                valread = read(sd, buffer, BUFFER_SIZE-1);
-                if (valread == 0) {
-                    // El publisher se desconectó
-                    printf("Publisher %d desconectado\n", i+1);
-                    remove_client(&pubs[i]);
-                } else {
-                    // Mensaje recibido de publisher
-                    buffer[valread] = '\0';
-                    printf("Mensaje de Publisher %d: %s\n", i+1, buffer);
-                    if (strncmp(buffer, "PUBLISH: ", 9) != 0) {
-                        // Ignorar si ya está registrado
-                        printf("Mensaje no válido de Publisher %d, ignorando\n", i+1);
-                        continue;
-                    }else{
-                        sscanf(buffer, "PUBLISH: %[^,\n]", msg);
-                        printf("Mensaje limpio: %s\n", msg);
-                        broadcast_to_subs(msg, strlen(msg));
-                        printf("Mensaje de Publisher %d enviado a todos los Subscribers\n", i+1);
-                    }
-                    
+            if (FD_ISSET(sd, &readfds)){
+                if(clients[i].role == ROLE_UNKNOWN){
+                    printf("Cliente en estado desconocido, cerrando conexion\n");
+                    remove_client(&clients[i]);
                 }
-            }
-        }
-
-        // Manejar actividad de subscribers
-        for (int i = 0; i < MAX_SUBS; i++) {
-            sd = subs[i].fd;
-            if (sd < 0) continue;
-
-            if (FD_ISSET(sd, &readfds)) {
-                valread = read(sd, buffer, BUFFER_SIZE-1);
-                if (valread == 0) {
-                    // El subscriber se desconectó
-                    printf("Subscriber desconectado\n");
-                    remove_client(&subs[i]);
-                } else {
-                    // Mensaje recibido de subscriber (no se espera que envíen mensajes)
-                    buffer[valread] = '\0';
-                    printf("Mensaje de Subscriber %d (no esperado): %s\n", i+1, buffer);
-                    if (strncmp(buffer, "FIN", 3) != 0) {
-                        // Ignorar si ya está registrado
-                        printf("Mensaje no válido de Subscriber %d, ignorando\n", i+1);
-                        continue;
-                    }else{
-                        // Subscriber quiere desconectarse
-                        printf("Subscriber %d solicitó desconexión\n", i+1);
-                        send(sd, "BYE\n", 4, 0);
-                        remove_client(&subs[i]);
+                // Ya registrado, manejar segun rol
+                if(clients[i].role == ROLE_PUBLISHER){
+                    valread = read(sd, buffer, BUFFER_SIZE-1);
+                    if (valread == 0) {
+                        // El publisher se desconectó
+                        printf("Publisher ID: %d desconectado\n", i+1);
+                        remove_client(&clients[i]);
+                    } else {
+                        // Mensaje recibido de publisher
+                        buffer[valread] = '\0';
+                        printf("Mensaje de Publisher ID: %d: %s\n", i+1, buffer);
+                        if (strncmp(buffer, "PUBLISH: ", 9) == 0) {
+                            // Enviar mensaje a todos los subscribers
+                            sscanf(buffer, "PUBLISH: %[^,\n]", msg);
+                            printf("Mensaje limpio: %s\n", msg);
+                            broadcast_to_subs(msg, strlen(msg));
+                            printf("Mensaje de Publisher ID: %d enviado a todos los Subscribers\n", i+1);
+                        }else if (strncmp(buffer, "FIN", 3) == 0) {
+                            // Publisher quiere desconectarse
+                            printf("Publisher ID: %d solicitó desconexión por enviar todos sus mensajes. Retirandolo\n", i+1);
+                            remove_client(&clients[i]);
+                        }
+                        else{
+                            // Ignorar mensaje errado
+                            printf("Mensaje no válido de Publisher ID: %d, ignorando\n", i+1);
+                        }
+                        
                     }
-                }
+                } 
+                /**else if(clients[i].role == ROLE_SUBSCRIBER){
+                    valread = read(sd, buffer, BUFFER_SIZE-1);
+                    if (valread == 0) {
+                        // El subscriber se desconectó
+                        printf("Subscriber desconectado\n");
+                        remove_client(&clients[i]);
+                    } else {
+                        // Mensaje recibido de subscriber (no se espera que envíen mensajes)
+                        buffer[valread] = '\0';
+                        printf("Mensaje de Subscriber %d (no esperado): %s\n", i+1, buffer);
+                        if (strncmp(buffer, "FIN", 3) != 0) {
+                            // Ignorar si ya está registrado
+                            printf("Mensaje no válido de Subscriber %d, ignorando\n", i+1);
+                            continue;
+                        }else{
+                            // Subscriber quiere desconectarse
+                            printf("Subscriber %d solicitó desconexión\n", i+1);
+                            remove_client(&clients[i]);
+                        }
+                    }
+                }**/
             }
         }
         for (int i = 0; i < MAX_PUBS + MAX_SUBS; i++) {unknowns[i].fd = -1;}
@@ -275,8 +289,7 @@ int main(int argc, char const* argv[]) {
     // Código del main
 
     for(int i=0;i<MAX_PUBS+MAX_SUBS;i++) if(unknowns[i].fd>=0) close(unknowns[i].fd);
-    for(int i=0;i<MAX_PUBS;i++) if(pubs[i].fd>=0) close(pubs[i].fd);
-    for(int i=0;i<MAX_SUBS;i++) if(subs[i].fd>=0) close(subs[i].fd);
+    for(int i=0;i<MAX_CLIENTS;i++) if(clients[i].fd>=0) close(clients[i].fd);
     if(listen_fd>=0) close(listen_fd);
     return 0;
 }
