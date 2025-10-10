@@ -62,14 +62,14 @@ int main(int argc, char const* argv[]) {
                 perror("Error enviando mensaje 1");
                 mensajes_fallidos++;
             }
-            sleep(2);
+            sleep(1);
             bytes_sent=send(client_fd, msg2, strlen(msg2), 0);
             printf("Mensaje enviado: %s", msg2);
             if (bytes_sent <= 0) {
                 perror("Error enviando mensaje 2");
                 mensajes_fallidos++;
             }
-            sleep(2);
+            sleep(1);
             mensajes_enviados+=2;
         }
         printf("Enviados %d mensajes con %d fallidos. Saliendo...\n", mensajes_enviados, mensajes_fallidos);
