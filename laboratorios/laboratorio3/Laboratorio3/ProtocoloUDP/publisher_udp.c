@@ -35,7 +35,7 @@ int main(int argc, char const* argv[]) {
         perror("Socket creation error");
         return -1;
     }
-
+    //Conectamos al servidor (no es necesario en UDP, pero lo hacemos para fijar la direccion)
     if ((status=connect(client_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr))) < 0) {
         perror("Connection failed");
         return -1;

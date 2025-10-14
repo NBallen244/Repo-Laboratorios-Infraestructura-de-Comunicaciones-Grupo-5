@@ -29,12 +29,13 @@ int main(int argc, char const* argv[]) {
         perror("Invalid address/ Address not supported");
         return -1;
     }
-
+    //Conectamos al servidor
     if ((status=connect(client_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr))) < 0) {
         perror("Connection failed");
         return -1;
     }
     printf("Conectado al broker\n");
+    //Enviamos login
     bytes_sent=send(client_fd, login, strlen(login), 0);
     printf("Login enviado, esperando respuesta...\n");
     if (bytes_sent < 0) {
@@ -43,8 +44,9 @@ int main(int argc, char const* argv[]) {
         return -1;
     }
     valread = read(client_fd, buffer, 1024-1);
-
+    // Verificamos si se recibió respuesta del broker confirmando el login
     if (valread > 0) {
+        //Al confirmarse, empezamos a esperar mensajes del broker
         buffer[valread] = '\0';
         if (strncmp(buffer, "SUBSCRIBER_LOGIN_OK", 19) == 0) {
             printf("Login exitoso. Esperando mensajes...\n");
@@ -70,6 +72,7 @@ int main(int argc, char const* argv[]) {
         if (client_fd >= 0) close(client_fd);
         return 0;
     }
+    //Cerramos el socket
     if (client_fd >= 0) close(client_fd);
     return 0;
 }   

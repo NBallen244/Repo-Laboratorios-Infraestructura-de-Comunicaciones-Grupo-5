@@ -24,7 +24,7 @@ typedef struct {
     client_role_t role;
 } client_t;
 
-// Arrays para publishers y subscribers
+// Arrays para publishers y subscribers (distinguidos por rol)
 static client_t clients[MAX_CLIENTS];
 static int pubs_count = 0;
 static int subs_count = 0;
@@ -45,7 +45,7 @@ static void remove_client(client_t *c){
     }
 }
 
-// Agrega un subscriber al array de subscribers
+// Agrega un subscriber
 static int add_sub(int fd){
     for(int i=0;i<MAX_CLIENTS;i++){
         if(clients[i].fd < 0 && subs_count < MAX_SUBS){
@@ -58,7 +58,7 @@ static int add_sub(int fd){
     }
     return -1;
 }
-
+//Agrega un publisher 
 static int add_pub(int fd){
     for(int i=0;i<MAX_CLIENTS;i++){
         if(clients[i].fd < 0 && pubs_count < MAX_PUBS){
@@ -71,7 +71,7 @@ static int add_pub(int fd){
     }
     return -1;
 }
-
+//Envia un mensaje a todos los subscribers (asumiendo un único topico)
 static void broadcast_to_subs(const char *line, size_t len){
     for(int i=0;i<MAX_CLIENTS;i++){
         if(clients[i].fd >= 0 && clients[i].role == ROLE_SUBSCRIBER){
@@ -101,13 +101,14 @@ int main(int argc, char const* argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    //Definimos la direccion del servidor (local)
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
     int opt = 1;
-    //reusar el puerto inmediatamente despues de cerrar el programa
+    //reusar el puerto inmediatamente despues de cerrar el programa (no esperar timeout)
     if (setsockopt(listen_fd, SOL_SOCKET,
                    SO_REUSEADDR | SO_REUSEPORT, &opt,
                    sizeof(opt))) {
@@ -115,13 +116,13 @@ int main(int argc, char const* argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    //linqueamos port al socket
+    //linqueamos la direccion y el puerto al socket del servidor
     if (bind(listen_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
         exit(EXIT_FAILURE);
     }
 
-    //Ponemos el socket en modo escucha
+    //Ponemos el socket en modo escucha para esperar conexiones entrantes
     if (listen(listen_fd, BACKLOG) < 0) {
         perror("listen failed");
         exit(EXIT_FAILURE);
@@ -131,32 +132,36 @@ int main(int argc, char const* argv[]) {
 
     // Inicializamos arrays de clientes
     init_arrays();
+    //Variables de select. Basicamente un poll de sockets
     fd_set readfds;
     int max_sd, sd, activity, valread;
     char buffer[BUFFER_SIZE];
 
+    // Un arreglo de clientes desconocidos para nuevas conexiones (no registrados aun)
     client_t unknowns[MAX_PUBS + MAX_SUBS];
     for (int i = 0; i < MAX_PUBS + MAX_SUBS; i++) {unknowns[i].fd = -1;unknowns[i].role = ROLE_UNKNOWN;}
 
     while (1) {
-        // Resetear sockets
+        // Reseteamos el poll o set de sockets
         FD_ZERO(&readfds);
+        //Agregar el socket del servidor (broker)
         FD_SET(listen_fd, &readfds);
         max_sd = listen_fd;
 
-        //Agregar sockets de los clientes actuales
+        //Agregar sockets de los clientes actuales que siguen conectados
         for (int i = 0; i < MAX_CLIENTS; i++) {
             sd = clients[i].fd;
             if (sd > 0) FD_SET(sd, &readfds);
             if (sd > max_sd) max_sd = sd;
         }
 
-        // Esperar accion de un cliente (publisher o subscriber)
+        // Esperar accion de un cliente (publisher, subscriber, o nuevo)
         activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
 
-        // Nueva conexion entrante
+        // Nueva conexion entrante (cliente desconocido se conecta al socket del servidor)
         if (FD_ISSET(listen_fd, &readfds)) {
             int addrlen = sizeof(address);
+            //definimos el socket del cliente
             client_socket = accept(listen_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
             printf("Nueva conexión aceptada\n");
             // Agregar a la lista de clientes desconocidos
@@ -175,6 +180,7 @@ int main(int argc, char const* argv[]) {
         for (int i = 0; i < MAX_CLIENTS; i++) {
             sd = unknowns[i].fd;
             if (sd < 0) continue;
+            //se recibe un mensaje de un cliente desconocido
             if (FD_ISSET(sd, &readfds)) {
                 // Leer datos del socket
                 printf("Esperando datos de login del cliente %d\n", i+1);
@@ -189,7 +195,7 @@ int main(int argc, char const* argv[]) {
                     printf("Mensaje recibido: %s\n", buffer);
 
                     if (strncmp(buffer, "PUBLISHER_LOGIN", 16) == 0) {
-                        // Registrar como publisher
+                        // Registrar como publisher si hay espacio
                         if (add_pub(sd) != 0) {
                             printf("No se pudo registrar como Publisher (límite alcanzado)\n");
                             sprintf(msg, "ERROR: No se pudo registrar como Publisher (límite alcanzado). Cerrando conexion\n");
@@ -201,7 +207,7 @@ int main(int argc, char const* argv[]) {
                             send(sd, msg, strlen(msg), 0);
                         }
                     } else if (strncmp(buffer, "SUBSCRIBER_LOGIN", 16) == 0) {
-                        // Registrar como subscriber
+                        // Registrar como subscriber si hay espacio
                         if (add_sub(sd) != 0) {
                             printf("No se pudo registrar como Subscriber (límite alcanzado)\n");
                             sprintf(msg, "ERROR: No se pudo registrar como Subscriber (límite alcanzado). Cerrando conexion\n");
@@ -227,6 +233,7 @@ int main(int argc, char const* argv[]) {
         for (int i = 0; i < MAX_CLIENTS; i++) {
             sd = clients[i].fd;
             if (sd < 0) continue;
+            //Si se percibe un envio de datos de un cliente registrado
             if (FD_ISSET(sd, &readfds)){
                 if(clients[i].role == ROLE_UNKNOWN){
                     printf("Cliente en estado desconocido, cerrando conexion\n");
@@ -260,7 +267,9 @@ int main(int argc, char const* argv[]) {
                         }
                         
                     }
-                } 
+                }
+                //Seccion que hubiera servido para manejar mensajes de subscribers, pero no es necesario al no enviar mensajes
+                //Sin mencionar que su lectura bloqueaba el flujo de mensajes (al no recibir nada)
                 /**else if(clients[i].role == ROLE_SUBSCRIBER){
                     valread = read(sd, buffer, BUFFER_SIZE-1);
                     if (valread == 0) {
@@ -284,12 +293,14 @@ int main(int argc, char const* argv[]) {
                 }**/
             }
         }
+        // Limpiar array de desconocidos (ya registrados o desconectados)
         for (int i = 0; i < MAX_PUBS + MAX_SUBS; i++) {unknowns[i].fd = -1;}
     }
     // Código del main
-
+    // Cerrar todos los sockets abiertos antes de salir
     for(int i=0;i<MAX_PUBS+MAX_SUBS;i++) if(unknowns[i].fd>=0) close(unknowns[i].fd);
     for(int i=0;i<MAX_CLIENTS;i++) if(clients[i].fd>=0) close(clients[i].fd);
+    // Cerrar socket de escucha
     if(listen_fd>=0) close(listen_fd);
     return 0;
 }

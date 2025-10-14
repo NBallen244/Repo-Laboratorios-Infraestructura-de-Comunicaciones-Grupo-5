@@ -18,10 +18,11 @@
 
 typedef enum { ROLE_UNKNOWN=0, ROLE_PUBLISHER=1, ROLE_SUBSCRIBER=2 } client_role_t;
 
-// Estructura para manejar clientes
+// Estructura para manejar clientes (diferente a TCP al no tener un socket dedicado (no hay conexiones por cliente))
 typedef struct {
     struct sockaddr_in addr;
     client_role_t role;
+    //Suple la funcion de socket, identificando si el espacio esta en uso, por ende manteniendo una "conexion" con el cliente
     int in_use;
 } udp_client_t;
 
@@ -35,7 +36,7 @@ static void init_arrays(void){
     for(int i=0;i<MAX_CLIENTS;i++){ clients[i].addr = (struct sockaddr_in){0}; clients[i].role = ROLE_UNKNOWN; clients[i].in_use = 0;}
 }
 
-//Comparar direcciones de clientes para saber si son
+//Compararamos una direccion con las registradas por cliente para saber si es el mismo
 static int same_peer(const struct sockaddr_in* a, const struct sockaddr_in* b){
     return a->sin_family==b->sin_family &&
     a->sin_addr.s_addr==b->sin_addr.s_addr &&
@@ -56,7 +57,7 @@ static int add_client(const struct sockaddr_in* addr, client_role_t role){
     return -1;
 }
 
-// Elimina un cliente (publisher o subscriber)
+// Elimina un cliente (publisher o subscriber)(homologado de TCP, pero poco funcional por no poder detectar desconexiones)
 static void remove_client(udp_client_t *c){
     for(int i=0;i<MAX_CLIENTS;i++){
         if(same_peer(&clients[i].addr, &c->addr)){
@@ -81,7 +82,7 @@ static int add_pub(const struct sockaddr_in* addr){
     return add_client(addr, ROLE_PUBLISHER);
 }
 
-
+// Envia un mensaje a todos los subscribers conectados (registrados, asumiendo que estan activos)
 static void broadcast_to_subs(const char *line, size_t len, int socket){
     for(int i=0;i<MAX_CLIENTS;i++){
         if(clients[i].in_use && clients[i].role == ROLE_SUBSCRIBER){
@@ -105,6 +106,7 @@ int main(int argc, char const* argv[]) {
     char msg[BUFFER_SIZE];
     socklen_t addrlen = sizeof(address);
     //Socket UDP del broker/servidor
+    //Asegura que la direccion este en 0 o vacía
     bzero(&address, sizeof(address));
     listen_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (listen_fd < 0) {
@@ -112,6 +114,9 @@ int main(int argc, char const* argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    //Definimos la direccion del servidor (local)
+    //En teoría memset hace lo mismo que bzero, pero la implementación por alguna razon
+    //no funciono sin el primer bzero.
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
@@ -126,7 +131,7 @@ int main(int argc, char const* argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    //linqueamos port al socket
+    //linqueamos port/direccion al socket
     if (bind(listen_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
         exit(EXIT_FAILURE);
@@ -136,6 +141,8 @@ int main(int argc, char const* argv[]) {
 
     // Inicializamos arrays de clientes
     init_arrays();
+    // Manejamos multiples clientes con select, aunque en este caso siendo de solo el socket del broker
+    //(homologado de TCP)
     fd_set readfds;
     int max_sd, sd, activity, valread;
     char buffer[BUFFER_SIZE]={0};
@@ -147,15 +154,20 @@ int main(int argc, char const* argv[]) {
         FD_SET(listen_fd, &readfds);
         max_sd = listen_fd;
 
-        // Esperar accion de un cliente (publisher o subscriber)
+        // Esperar accion de un cliente (publisher o subscriber) mediante el socket del broker
         activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
 
         // Nueva conexion entrante
         if (FD_ISSET(listen_fd, &readfds)) {
             struct sockaddr_in cli; socklen_t clen = sizeof(cli);
+            //Ya no resguardamos conexiones nuevas al no poder identificar conexiones en UDP
+            //Solo recibimos mensajes de quien sea e identificamos su rol por el mensaje, e identificamos sobre la direccion
+            //de la última recepcion.
+            //Recibimos mensaje
             valread = recvfrom(listen_fd, buffer, BUFFER_SIZE-1, 0, (struct sockaddr *)&cli, &clen);
             if (valread < 0) {
                 perror("recvfrom");
+                // Si hay error, intentar eliminar al cliente (si es que estaba registrado)
                 int descarte=find_client(&cli);
                 if(descarte>=0) {
                     if (clients[descarte].role == ROLE_PUBLISHER) {pubs_count--; printf("Publisher ID: %d desconectado\n", descarte+1);}
@@ -164,9 +176,11 @@ int main(int argc, char const* argv[]) {
                 }
                 continue;
             }
-            // Agregar a la lista de clientes desconocidos
             buffer[valread] = '\0';
+            // Verificamos si el cliente ya está registrado, es decir, el mensaje vino de una dirección de la que
+            //ya habíamos recibido mensajes
             int index=find_client(&cli);
+            //Si no está registrado, esperar login
             if(index<0){
                 printf("Nuevo cliente conectado, esperando login\n");
                 printf("Mensaje recibido: %s\n", buffer);
@@ -220,7 +234,7 @@ int main(int argc, char const* argv[]) {
                         broadcast_to_subs(msg, strlen(msg), listen_fd);
                         printf("Mensaje de Publisher ID: %d enviado a todos los Subscribers\n", index+1);
                     }else if (strncmp(buffer, "FIN", 3) == 0) {
-                        // Publisher quiere desconectarse
+                        // Publisher quiere desconectarse (no detectamos desconexión, pero lo podemos borrar para evitar mensajes futuros tras FIN de esta fuente, a menos que se registre de nuevo)
                         printf("Publisher ID: %d solicitó desconexión por enviar todos sus mensajes. Retirandolo\n", index+1);
                         remove_client(&clients[index]);
                     }
@@ -229,6 +243,7 @@ int main(int argc, char const* argv[]) {
                         printf("Mensaje no válido o incompleto de Publisher ID: %d, ignorando\n", index+1);
                     }
                 }else if(clients[index].role == ROLE_SUBSCRIBER){
+                    //No esperamos mensajes de subscribers, solo de publishers
                     printf("Mensaje recibido de Subscriber %d (ignorado): %s\n", index+1, buffer);
                 }else{
                     printf("Cliente en estado desconocido intentando enviar mensaje. cerrando conexion\n");
